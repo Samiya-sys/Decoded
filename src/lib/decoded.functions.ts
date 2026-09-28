@@ -301,7 +301,7 @@ Most ordinary agreements should not score above 64.
 `.trim();
 
 /* -------------------------------------------------- */
-/* Gemini structured-output schema                     */
+/* AI provider structured-output schema                */
 /* -------------------------------------------------- */
 
 const jsonSchema = {
@@ -422,11 +422,13 @@ const jsonSchema = {
 };
 
 /* -------------------------------------------------- */
-/* Gemini Interactions API helpers                     */
+/* OpenRouter API helpers                              */
 /* -------------------------------------------------- */
 
-const GEMINI_INTERACTIONS_URL =
-  "https://generativelanguage.googleapis.com/v1beta/interactions";
+const OPENROUTER_URL =
+  "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_OPENROUTER_MODEL =
+  "openai/gpt-oss-120b:free";
 
 function wait(ms: number) {
   return new Promise((resolve) => {
@@ -457,118 +459,52 @@ async function apiErrorMessage(response: Response) {
   }
 }
 
-type InteractionResponse = {
-  id?: string;
-  status?: string;
-  output_text?: string;
-
-  outputs?: Array<{
-    type?: string;
-    text?: string;
-    content?: Array<{
-      type?: string;
-      text?: string;
-    }>;
-  }>;
-
-  steps?: Array<{
-    type?: string;
-    status?: string;
-
-    content?: Array<{
-      type?: string;
-      text?: string;
-    }>;
+type OpenRouterResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{
+        type?: string;
+        text?: string;
+      }>;
+    };
   }>;
 };
 
-function getInteractionText(
-  payload: InteractionResponse,
+function getOpenRouterText(
+  payload: OpenRouterResponse,
 ) {
-  /*
-   * Current API responses may expose output_text
-   * directly.
-   */
-  if (
-    typeof payload.output_text === "string" &&
-    payload.output_text.trim()
-  ) {
-    return payload.output_text.trim();
+  const content = payload.choices?.[0]?.message?.content;
+
+  if (typeof content === "string") {
+    return content.trim();
   }
 
-  /*
-   * Handle outputs[] representation.
-   */
-  if (Array.isArray(payload.outputs)) {
-    const directOutput = payload.outputs
-      .map((output) => {
-        if (
-          typeof output.text === "string"
-        ) {
-          return output.text;
-        }
-
-        return (
-          output.content
-            ?.filter(
-              (item) =>
-                item.type === "text" &&
-                typeof item.text === "string",
-            )
-            .map((item) => item.text)
-            .join("") ?? ""
-        );
-      })
-      .join("")
-      .trim();
-
-    if (directOutput) {
-      return directOutput;
-    }
-  }
-
-  /*
-   * REST responses can expose the generated text
-   * inside model_output steps.
-   */
-  if (Array.isArray(payload.steps)) {
-    const modelSteps = payload.steps.filter(
-      (step) => step.type === "model_output",
-    );
-
-    const stepOutput = modelSteps
-      .flatMap((step) => step.content ?? [])
-      .filter(
-        (item) =>
-          item.type === "text" &&
-          typeof item.text === "string",
-      )
-      .map((item) => item.text!)
-      .join("")
-      .trim();
-
-    if (stepOutput) {
-      return stepOutput;
-    }
-  }
-
-  return "";
+  return content
+    ?.filter(
+      (item) => item.type === "text" && typeof item.text === "string",
+    )
+    .map((item) => item.text)
+    .join("")
+    .trim() ?? "";
 }
 
-async function callGemini(
+async function callOpenRouter(
   apiKey: string,
   input: string,
   schema: object,
 ) {
   const body = {
-    model: "gemini-3.8-flash",
-
-    input,
-
+    model: process.env["OPENROUTER_MODEL"] ?? DEFAULT_OPENROUTER_MODEL,
+    messages: [{ role: "user", content: input }],
+    max_tokens: 16000,
+    temperature: 0.1,
     response_format: {
-      type: "text",
-      mime_type: "application/json",
-      schema,
+      type: "json_schema",
+      json_schema: {
+        name: "decoded_result",
+        strict: true,
+        schema,
+      },
     },
   };
 
@@ -579,19 +515,15 @@ async function callGemini(
     attempt < 4;
     attempt += 1
   ) {
-    response = await fetch(
-      GEMINI_INTERACTIONS_URL,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-
-        body: JSON.stringify(body),
+    response = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "X-Title": "Decoded",
       },
-    );
+      body: JSON.stringify(body),
+    });
 
     if (response.ok) {
       break;
@@ -639,49 +571,49 @@ async function callGemini(
     if (response.status === 429) {
       throw new Error(
         message ||
-          "Gemini is receiving too many requests right now. Please try again shortly.",
+          "The AI provider is receiving too many requests right now. Please try again shortly.",
       );
     }
 
     if (response.status === 401) {
       throw new Error(
-        "The Gemini API key is invalid or unavailable.",
+        "The AI provider key is invalid or unavailable."
       );
     }
 
     if (response.status === 403) {
       throw new Error(
         message ||
-          "Gemini API access is unavailable for this key.",
+          "AI provider access is unavailable for this key.",
       );
     }
 
     if (response.status === 400) {
       throw new Error(
         message ||
-          "Gemini rejected the analysis request.",
+          "The AI provider rejected the analysis request.",
       );
     }
 
     throw new Error(
       message ||
-        `Gemini returned error ${response.status}.`,
+        `The AI provider returned error ${response.status}.`
     );
   }
 
   const payload =
-    (await response.json()) as InteractionResponse;
+    (await response.json()) as OpenRouterResponse;
 
-  const output = getInteractionText(payload);
+  const output = getOpenRouterText(payload);
 
   if (!output) {
     console.error(
-      "Gemini returned no text output:",
+      "The AI provider returned no text output:",
       payload,
     );
 
     throw new Error(
-      "Gemini returned an empty response. Please try again.",
+      "The AI provider returned an empty response. Please try again."
     );
   }
 
@@ -724,12 +656,12 @@ function parseJsonOutput<T>(raw: string): T {
     }
 
     console.error(
-      "Could not parse Gemini JSON:",
+      "Could not parse AI provider JSON:",
       raw,
     );
 
     throw new Error(
-      "Gemini returned an unreadable analysis. Please try again.",
+      "The AI provider returned an unreadable analysis. Please try again."
     );
   }
 }
@@ -747,11 +679,11 @@ export const analyzeTerms = createServerFn({
   .handler(
     async ({ data }): Promise<Analysis> => {
       const apiKey =
-        process.env["GEMINI_API_KEY"];
+        process.env["OPENROUTER_API_KEY"];
 
       if (!apiKey) {
         throw new Error(
-          "AI is not configured. Add GEMINI_API_KEY to your server environment.",
+          "AI is not configured. Add an OpenRouter API key to your server environment.",
         );
       }
 
@@ -825,7 +757,7 @@ ${truncated}
 ---
 `.trim();
 
-      const raw = await callGemini(
+      const raw = await callOpenRouter(
         apiKey,
         prompt,
         jsonSchema,
@@ -1026,11 +958,11 @@ export const askDocument = createServerFn({
       data,
     }): Promise<DocumentAnswer> => {
       const apiKey =
-        process.env["GEMINI_API_KEY"];
+        process.env["OPENROUTER_API_KEY"];
 
       if (!apiKey) {
         throw new Error(
-          "AI is not configured. Add GEMINI_API_KEY to your server environment.",
+          "AI is not configured. Add an OpenRouter API key to your server environment.",
         );
       }
 
@@ -1056,7 +988,7 @@ ${data.question}
 Return only the structured answer requested by the response schema.
 `.trim();
 
-      const raw = await callGemini(
+      const raw = await callOpenRouter(
         apiKey,
         prompt,
         askJsonSchema,
